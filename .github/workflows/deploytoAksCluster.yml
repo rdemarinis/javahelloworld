@@ -1,0 +1,63 @@
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    
+    - uses: actions/checkout@master
+    
+    - uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create ACR
+      id: create-acr
+      run: |
+        az acr create -n rdmregistry01 -g rdmregistry01a726-rg --location "West Europe" --sku Standard --admin-enabled
+        echo "::set-output name=acr_username::`az acr credential show -n rdmregistry01 --query username | xargs`"
+        echo "::set-output name=acr_password::`az acr credential show -n rdmregistry01 --query passwords[0].value | xargs`"
+        echo "::add-mask::`az acr credential show -n rdmregistry01 --query passwords[0].value | xargs`"
+
+    - uses: azure/docker-login@v1
+      with:
+        login-server: rdmregistry01.azurecr.io
+        username: ${{ steps.create-acr.outputs.acr_username }}
+        password: ${{ steps.create-acr.outputs.acr_password }}
+
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE/" -f  "Dockerfile" -t rdmregistry01.azurecr.io/k8s001:${{ github.sha }}
+        docker push rdmregistry01.azurecr.io/k8s001:${{ github.sha }}
+    
+    - uses: azure/k8s-set-context@v1
+      id: login
+      with:
+         kubeconfig: ${{ secrets.aks_k8s001_kubeConfig }}
+    
+    - name: Create namespace
+      run: |
+        namespacePresent=`kubectl get namespace | grep k8s001f1f5 | wc -l`
+        if [ $namespacePresent -eq 0 ]
+        then
+            echo `kubectl create namespace k8s001f1f5`
+        fi
+
+    - uses: azure/k8s-create-secret@v1
+      with:
+        namespace: k8s001f1f5
+        container-registry-url: rdmregistry01.azurecr.io
+        container-registry-username: ${{ steps.create-acr.outputs.acr_username }}
+        container-registry-password: ${{ steps.create-acr.outputs.acr_password }}
+        secret-name: k8s001dockerauth
+       
+    - uses: azure/k8s-deploy@v1
+      with:
+        namespace: k8s001f1f5
+        manifests: |
+          manifests/deployment.yml
+          manifests/service.yml
+        images: |
+          rdmregistry01.azurecr.io/k8s001:${{ github.sha }}
+        imagepullsecrets: |
+          k8s001dockerauth
